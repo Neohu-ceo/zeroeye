@@ -68,6 +68,37 @@ MEMORY_THRESHOLD_CRITICAL = 90
 # CHECK FUNCTIONS
 # ---------------------------------------------------------------------------
 
+
+def run_with_retry(check_fn, args, retries, backoff_secs):
+    """Run a check with retry logic. Only retries network timeouts and 5xx."""
+    import http.client as _hc
+    for attempt in range(retries):
+        start = time.time()
+        try:
+            status, detail, ms = check_fn(*args)
+            elapsed = int((time.time() - start) * 1000)
+            print(f"  [{attempt+1}/{retries}] {status} — {detail} ({elapsed}ms)")
+            
+            # Don't retry 4xx client errors
+            if status == "FAIL" and "4" in str(detail) and "HTTP" in str(detail):
+                return status, detail, ms
+            
+            if status == "OK":
+                return status, detail, ms
+            
+            # Retry on FAIL (network errors, 5xx)
+            if attempt < retries - 1:
+                print(f"  ↻ retrying in {backoff_secs}s...")
+                time.sleep(backoff_secs * (attempt + 1))
+        except Exception as e:
+            elapsed = int((time.time() - start) * 1000)
+            print(f"  [{attempt+1}/{retries}] ERROR — {e} ({elapsed}ms)")
+            if attempt < retries - 1:
+                time.sleep(backoff_secs * (attempt + 1))
+    
+    return "FAIL", f"all {retries} attempts failed", 0
+
+
 def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
     import http.client
     try:
@@ -302,6 +333,9 @@ def print_health_report(results: Dict[str, Any]):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Health check tool")
+    parser.add_argument("--retries", type=int, default=1, help="Number of retries for transient failures")
+    parser.add_argument("--timeout-secs", type=int, default=10, help="Timeout per attempt in seconds")
+    parser.add_argument("--backoff-secs", type=int, default=2, help="Backoff between retries in seconds")
     parser.add_argument("--service", "-s", help="Check specific service only")
     parser.add_argument("--json", "-j", action="store_true", help="JSON output")
     parser.add_argument("--watch", "-w", action="store_true", help="Continuous monitoring")
